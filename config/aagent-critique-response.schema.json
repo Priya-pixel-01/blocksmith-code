@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Blocksmith Critique Agent Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["decision", "agentFeedback", "blockingIssues"],
+  "properties": {
+    "decision": {
+      "type": "string",
+      "enum": ["accept", "revise", "reject"]
+    },
+    "summary": {
+      "type": "string"
+    },
+    "agentFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cartographer": { "$ref": "#/$defs/agentCorrection" },
+        "interpreter": { "$ref": "#/$defs/agentCorrection" },
+        "reuse": { "$ref": "#/$defs/agentCorrection" },
+        "planner": { "$ref": "#/$defs/agentCorrection" },
+        "builder": { "$ref": "#/$defs/agentCorrection" },
+        "verifier": { "$ref": "#/$defs/agentCorrection" }
+      }
+    },
+    "blockingIssues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+    "rerunFrom": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "enum": ["cartographer", "interpreter", "reuse", "planner", "builder", "verifier"]
+      }
+    }
+  },
+  "$defs": {
+    "agentCorrection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instructions"],
+      "properties": {
+        "instructions": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "evidence": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "severity": {
+          "type": "string",
+          "enum": ["blocker", "major", "minor"]
+        }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["agent", "description"],
+      "properties": {
+        "agent": {
+          "type": "string",
+          "enum": ["cartographer", "interpreter", "reuse", "planner", "builder", "verifier"]
+        },
+        "description": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  }
+}

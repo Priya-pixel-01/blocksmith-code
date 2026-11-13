@@ -1,0 +1,12 @@
+{
+  "$comment": "OpenRouter model id per agent role. Edit these ids here and restart the Blocksmith server to apply.",
+   "cartographer": "nvidia/nemotron-3.5-super-vl:free",
+  "interpreter": "nvidia/nemotron-3.5-super-vl:free",
+  "reuse": "nvidia/nemotron-3.5-super-vl:free",
+  "planner": "nvidia/nemotron-3.5-super-vl:free",
+  "builder": "nvidia/nemotron-3.5-super-vl:free",
+  "verifier": "nvidia/nemotron-3.5-super-vl:free"
+
+}
+
+

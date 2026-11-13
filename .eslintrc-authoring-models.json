@@ -1,0 +1,19 @@
+{
+  "env": {
+    "node": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2020
+  },
+  "overrides": [
+    {
+      "files": ["**/*models*.json", "**/*authoring*.json"],
+      "extends": ["plugin:xwalk/recommended"],
+      "rules": {
+        "xwalk/no-orphan-collapsible-fields": "error",
+        "xwalk/collapsible-fields-must-be-grouped": "error",
+        "xwalk/collapsible-fields-require-wrapper": "error"
+      }
+    }
+  ]
+}
