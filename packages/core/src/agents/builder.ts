@@ -4,10 +4,12 @@ import type { RepoProfile } from "../schemas/repo-profile.js";
 import type { BlockSpec } from "../schemas/block-spec.js";
 import type { Plan } from "../schemas/plan.js";
 import type { ModelRouter } from "../llm/router.js";
+import type { SourceArtifact } from "../schemas/source.js";
 import { createFsTools } from "../tools/fs.js";
 import { createBlockTools } from "../tools/blocks.js";
 import { createRunLintTool, runLint, type LintResult } from "../tools/lint.js";
 import { resolveInSandbox } from "../tools/sandbox.js";
+import { designSourceMessages } from "./design-source-messages.js";
 
 const SYSTEM_PROMPT = `You are the Block Builder for Blocksmith. You write a real, production Adobe Edge \
 Delivery Services block into an isolated copy of the target repo, following the plan a human has \
@@ -72,6 +74,7 @@ export interface BuildBlockOptions {
   blockSpec: BlockSpec;
   plan: Plan;
   router: ModelRouter;
+  sourceArtifact: SourceArtifact;
   /** Issues from a previous Verifier pass, if this is a rebuild iteration. */
   feedback?: string;
 }
@@ -84,7 +87,7 @@ export interface BuildResult {
   costUsd: number | null;
 }
 
-export async function buildBlock({ workspaceDir, repoProfile, blockSpec, plan, router, feedback }: BuildBlockOptions): Promise<BuildResult> {
+export async function buildBlock({ workspaceDir, repoProfile, blockSpec, plan, router, sourceArtifact, feedback }: BuildBlockOptions): Promise<BuildResult> {
   const allowedPaths = [...plan.filesToCreate, ...plan.filesToModify];
   const tools = createBuilderTools(workspaceDir, repoProfile, allowedPaths);
 
@@ -92,8 +95,8 @@ export async function buildBlock({ workspaceDir, repoProfile, blockSpec, plan, r
 
   const loop = await router.runAgentLoop({
     role: "builder",
-    system: SYSTEM_PROMPT,
-    prompt,
+    system: repoProfile.projectType === "unknown" ? GENERIC_BUILDER_PROMPT : SYSTEM_PROMPT,
+    messages: await designSourceMessages(prompt, sourceArtifact),
     tools,
     maxSteps: 24,
   });
@@ -104,6 +107,16 @@ export async function buildBlock({ workspaceDir, repoProfile, blockSpec, plan, r
 
   return { filesWritten, filesMissing, lint, summary: loop.text, costUsd: loop.costUsd };
 }
+
+const GENERIC_BUILDER_PROMPT = `You are creating a standalone, framework-neutral component for a repository whose framework was not confidently detected.
+
+- Use only the exact approved file paths.
+- Create a complete HTML document linked to the approved sibling CSS and JavaScript files, so it can be previewed directly.
+- Use semantic, accessible HTML and plain browser JavaScript without framework imports or build-tool assumptions.
+- Scope every CSS selector to the component's root class to avoid changing other pages.
+- Match the original design image supplied with the request as closely as possible: proportions, alignment, spacing, colors, typography, borders, and image crops. Do not substitute generic styling when the image gives visual evidence.
+- The repository may use a framework that this fallback cannot safely integrate with. Do not claim to wire the component into an application entry point.
+- Run the repository lint command if one exists.`;
 
 function buildPrompt(repoProfile: RepoProfile, blockSpec: BlockSpec, plan: Plan, allowedPaths: string[], feedback?: string): string {
   return `## Target repo
@@ -122,6 +135,9 @@ ${plan.domContract}
 
 Universal Editor fields:
 ${plan.ueFields.map((f) => `- ${f.name} (${f.component})${f.required ? " — required" : ""}: ${f.label}`).join("\n") || "(none)"}
+
+Design specification:
+${JSON.stringify(blockSpec, null, 2)}
 
 Tokens to reuse: ${plan.tokensReused.join(", ") || "(none)"}
 New tokens to define: ${plan.tokensNew.map((t) => `${t.name}: ${t.value}`).join(", ") || "(none)"}

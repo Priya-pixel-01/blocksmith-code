@@ -63,6 +63,15 @@ test("AEM spec validation accepts relative artifact names resolved by the planne
   assert.deepEqual(result, { isValid: true, errors: [] });
 });
 
+test("AEM spec validation rejects the shared Granite clientlib template as a local artifact", () => {
+  const result = validateAEMComponentSpec(profile, spec({
+    htl: ["clientlib.html"],
+    dialog: ["_cq_dialog/clientlib.html"],
+  }));
+  assert.equal(result.isValid, false);
+  assert.equal(result.errors.filter((error) => error.includes("shared Granite clientlib.html template")).length, 2);
+});
+
 test("without a frontend module, accept component clientlibs and reject uncompiled or misplaced assets", () => {
   const localProfile = { ...profile, modules: profile.modules.filter((module) => module.kind !== "frontend") };
   const root = "ui.apps/src/main/content/jcr_root/apps/wknd/components/subscribe-button";

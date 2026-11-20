@@ -8,6 +8,7 @@ import type { RepoProfile } from "../schemas/repo-profile.js";
 import type { ModelRouter } from "../llm/router.js";
 import { runLint } from "../tools/lint.js";
 import { renderBlock } from "../verify/render.js";
+import { renderGenericComponent } from "../verify/render-generic.js";
 import { scanAccessibility } from "../verify/axe.js";
 
 const VisionCritiqueSchema = z.object({
@@ -33,6 +34,8 @@ Only mark pass:true if there are no blocker or major issues. Be specific: "the i
 misaligned" is not useful, "the image and text are stacked at 1200px but should be side-by-side"
 is.`;
 
+const GENERIC_SYSTEM_PROMPT = `You are the visual verifier for a standalone HTML/CSS/JavaScript component. Compare its rendered screenshots at mobile, tablet, and desktop sizes against the original design image. Check layout, proportions, spacing, colors, typography, image crops, responsive behavior, content, and accessibility. Be specific and give actionable fixes. Only pass when there are no blocker or major issues.`;
+
 export interface VerifyBlockOptions {
   workspaceDir: string;
   repoProfile: RepoProfile;
@@ -51,13 +54,31 @@ export interface VerifyBlockResult {
 export async function verifyBlock({ workspaceDir, repoProfile, plan, sourceArtifact, router, outDir, iteration }: VerifyBlockOptions): Promise<VerifyBlockResult> {
   const blockName = plan.blockName;
 
-  const [lint, render, axe] = await Promise.all([
-    runLint(workspaceDir, repoProfile.conventions.lintCommand),
-    renderBlock({ workspaceDir, blockName, ueFields: plan.ueFields, outDir }),
-    scanAccessibility({ workspaceDir, blockName, ueFields: plan.ueFields }),
-  ]);
+  const isGeneric = repoProfile.projectType === "unknown";
+  const [lint, render, axe] = isGeneric
+    ? await Promise.all([
+        runLint(workspaceDir, repoProfile.conventions.lintCommand),
+        renderGenericComponent({
+          workspaceDir,
+          htmlPath: plan.filesToCreate.find((path) => path.endsWith(".html")) ?? `${blockName}/${blockName}.html`,
+          outDir,
+        }),
+      ]).then(([lintResult, genericRender]) => [lintResult, genericRender, genericRender.axe] as const)
+    : await Promise.all([
+        runLint(workspaceDir, repoProfile.conventions.lintCommand),
+        renderBlock({ workspaceDir, blockName, ueFields: plan.ueFields, outDir }),
+        scanAccessibility({ workspaceDir, blockName, ueFields: plan.ueFields }),
+      ]);
 
   const mechanicalIssues = buildMechanicalIssues(lint, axe);
+  if (render.consoleErrors.length > 0) {
+    mechanicalIssues.push({
+      severity: "major",
+      area: "layout",
+      description: `Browser console errors: ${render.consoleErrors.join("; ")}`,
+      suggestedFix: "Fix the HTML, CSS, or JavaScript errors before retrying.",
+    });
+  }
 
   // A block that never even rendered isn't something a vision model can usefully critique —
   // report the failure directly rather than asking it to describe a broken/blank page.
@@ -84,12 +105,12 @@ export async function verifyBlock({ workspaceDir, repoProfile, plan, sourceArtif
     role: "verifier",
     schema: VisionCritiqueSchema,
     schemaName: "VisionCritique",
-    system: SYSTEM_PROMPT,
+    system: isGeneric ? GENERIC_SYSTEM_PROMPT : SYSTEM_PROMPT,
     messages,
   });
 
   const allIssues = [...mechanicalIssues, ...result.object.issues];
-  const pass = result.object.pass && lint.passed && axe.violationCount === 0;
+  const pass = result.object.pass && lint.passed && axe.violationCount === 0 && render.consoleErrors.length === 0;
 
   const verdict = VerdictReportSchema.parse({
     pass,

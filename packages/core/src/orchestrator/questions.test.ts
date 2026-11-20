@@ -30,6 +30,13 @@ test("questionsForAemSpec creates MCQ and text questions before planning", () =>
   assert.equal(questions[1]?.kind, "text");
 });
 
+test("questionsForAemSpec asks for the parent folder when creating a new component", () => {
+  const questions = questionsForAemSpec({ ...SPEC, parentPath: null });
+  assert.equal(questions[0]?.id, "component-parent-path");
+  assert.equal(questions[0]?.kind, "text");
+  assert.match(questions[0]?.prompt ?? "", /parent folder/i);
+});
+
 test("component, icon, and inheritance ambiguities get actionable choices", () => {
   const questions = questionsForAemSpec({
     ...SPEC,

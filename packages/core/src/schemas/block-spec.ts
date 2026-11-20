@@ -21,6 +21,7 @@ export type TokenMapping = z.infer<typeof TokenMappingSchema>;
 
 export const BlockSpecSchema = z.object({
   blockNameCandidate: z.string().describe("kebab-case candidate name, e.g. 'testimonial-carousel'."),
+  targetDirectory: z.string().nullable().optional().describe("Repository-relative parent directory selected by the user for an unsupported project structure."),
   intent: z.string().describe("One or two sentences: what this block is for."),
   ueFields: z.array(UeFieldSchema),
   domContract: z.string().describe("Markdown description of the semantic DOM decorate() should produce."),

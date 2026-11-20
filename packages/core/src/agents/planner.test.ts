@@ -69,6 +69,32 @@ test("computeFilePlan throws if reuseDecision is extend/variant with no targetBl
   assert.throws(() => computeFilePlan(profile, BASE_BLOCK_SPEC, reuseDecision), /has no targetBlock/);
 });
 
+test("computeFilePlan asks unknown projects to use their selected folder without assuming EDS paths", async () => {
+  const detectedProfile = await buildRepoProfile(FIXTURE_ROOT);
+  const profile = { ...detectedProfile, projectType: "unknown" as const };
+  const reuseDecision: ReuseDecision = { decision: "create", targetBlock: null, rationale: "Unsupported framework.", confidence: 1 };
+  const result = computeFilePlan(profile, { ...BASE_BLOCK_SPEC, targetDirectory: "src/components" }, reuseDecision);
+
+  assert.equal(result.adjustedBlockName, "testimonial-carousel");
+  assert.deepEqual(result.filesToCreate, [
+    "src/components/testimonial-carousel/testimonial-carousel.html",
+    "src/components/testimonial-carousel/testimonial-carousel.css",
+    "src/components/testimonial-carousel/testimonial-carousel.js",
+  ]);
+  assert.deepEqual(result.filesToModify, []);
+});
+
+test("computeFilePlan rejects unknown projects without a user-selected destination", async () => {
+  const detectedProfile = await buildRepoProfile(FIXTURE_ROOT);
+  const profile = { ...detectedProfile, projectType: "unknown" as const };
+  const reuseDecision: ReuseDecision = { decision: "create", targetBlock: null, rationale: "Unsupported framework.", confidence: 1 };
+
+  assert.throws(
+    () => computeFilePlan(profile, BASE_BLOCK_SPEC, reuseDecision),
+    /destination folder must be selected/,
+  );
+});
+
 test("createPlan merges deterministic file plan and token reuse with the model's narrative into a schema-valid Plan", async () => {
   const profile = await buildRepoProfile(FIXTURE_ROOT);
   const reuseDecision: ReuseDecision = { decision: "create", targetBlock: null, rationale: "No analogue exists.", confidence: 0.9 };

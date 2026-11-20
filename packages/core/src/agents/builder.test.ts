@@ -10,6 +10,7 @@ import { buildRepoProfile } from "./cartographer/index.js";
 import { computeFilePlan } from "./planner.js";
 import { createJobWorkspace, removeJobWorkspace } from "../workspace/isolate.js";
 import type { BlockSpec } from "../schemas/block-spec.js";
+import type { SourceArtifact } from "../schemas/source.js";
 import type { Plan, ReuseDecision } from "../schemas/plan.js";
 import type { ModelRouter, AgentLoopResult } from "../llm/router.js";
 import type { ToolSet } from "ai";
@@ -84,6 +85,14 @@ const FAKE_BLOCK_SPEC: BlockSpec = {
   openQuestions: [],
 };
 
+const FAKE_SOURCE_ARTIFACT: SourceArtifact = {
+  kind: "image",
+  originGeoRef: "test-design.png",
+  textContent: null,
+  images: [],
+  structured: null,
+};
+
 const FAKE_REUSE_DECISION: ReuseDecision = { decision: "create", targetBlock: null, rationale: "No analogue exists.", confidence: 0.9 };
 
 async function makeScratchWorkspace() {
@@ -149,7 +158,7 @@ test("buildBlock writes exactly the planned files and passes real lint", async (
       "blocks/testimonial-carousel/_testimonial-carousel.json": NEW_BLOCK_UE_JSON,
     });
 
-    const result = await buildBlock({ workspaceDir: ws.dir, repoProfile, blockSpec: FAKE_BLOCK_SPEC, plan, router });
+    const result = await buildBlock({ workspaceDir: ws.dir, repoProfile, blockSpec: FAKE_BLOCK_SPEC, plan, sourceArtifact: FAKE_SOURCE_ARTIFACT, router });
 
     assert.deepEqual(result.filesWritten.sort(), plan.filesToCreate.sort());
     assert.deepEqual(result.filesMissing, []);
@@ -191,7 +200,7 @@ test("buildBlock does not write files outside the plan's allowlist, even if the 
     });
 
     await assert.rejects(
-      () => buildBlock({ workspaceDir: ws.dir, repoProfile, blockSpec: FAKE_BLOCK_SPEC, plan, router }),
+      () => buildBlock({ workspaceDir: ws.dir, repoProfile, blockSpec: FAKE_BLOCK_SPEC, plan, sourceArtifact: FAKE_SOURCE_ARTIFACT, router }),
       /not in this job's approved file list/,
     );
 
