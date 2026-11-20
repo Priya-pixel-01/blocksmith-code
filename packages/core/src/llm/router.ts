@@ -121,13 +121,18 @@ export class ModelRouter {
    * result out of the exploration — this two-call pattern (explore freely, then extract a typed
    * decision) is more reliable across models than asking for tool calls and strict JSON at once.
    */
-  async runAgentLoop(args: { role: ModelRole; system: string; prompt: string; tools: ToolSet; maxSteps?: number }): Promise<AgentLoopResult> {
+  async runAgentLoop(args: {
+    role: ModelRole;
+    system: string;
+    tools: ToolSet;
+    maxSteps?: number;
+  } & ({ prompt: string; messages?: never } | { messages: ModelMessage[]; prompt?: never })): Promise<AgentLoopResult> {
     const model = this.getModel(args.role);
 
     const result = await generateText({
       model,
       system: args.system,
-      prompt: args.prompt,
+      ...(args.messages ? { messages: args.messages } : { prompt: args.prompt }),
       tools: args.tools,
       stopWhen: stepCountIs(args.maxSteps ?? 6),
     });

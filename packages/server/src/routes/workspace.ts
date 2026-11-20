@@ -20,20 +20,23 @@ async function pickFolderPath(): Promise<string | null> {
 
   const script = [
     "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -TypeDefinition 'using System; using System.Runtime.InteropServices; using System.Windows.Forms; public sealed class BlocksmithWindow : IWin32Window { [DllImport(\"user32.dll\")] private static extern IntPtr GetForegroundWindow(); public IntPtr Handle { get; private set; } public BlocksmithWindow() { Handle = GetForegroundWindow(); } }'",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
     "$dialog.Description = 'Select repository folder'",
     "$dialog.ShowNewFolderButton = $false",
-    "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }",
+    "$owner = New-Object BlocksmithWindow",
+    "if ($dialog.ShowDialog($owner) -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Out.Write($dialog.SelectedPath) }",
   ].join("; ");
 
   const { stdout } = await execFileAsync("powershell.exe", [
     "-NoProfile",
     "-NonInteractive",
+    "-STA",
     "-ExecutionPolicy",
     "Bypass",
     "-Command",
     script,
-  ]);
+  ], { timeout: 5 * 60 * 1000 });
 
   const selected = stdout.trim();
   return selected.length > 0 ? selected : null;

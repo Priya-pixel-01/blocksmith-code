@@ -59,7 +59,7 @@ function safeReadJson<T>(path: string): T | null {
  * This intentionally does not use an LLM: project type is a structural fact that can
  * be determined from repository files.
  */
-export const DETECTOR_VERSION = "3";
+export const DETECTOR_VERSION = "4";
 
 export function detectProjectClassification(root: string): ProjectClassification {
   const packageJson = safeReadJson<{

@@ -2,7 +2,7 @@ import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import type { AemArtifact, AemComponent, AemModule, RepositoryRelationship } from "../../schemas/aem-profile.js";
 
-export const AEM_PROFILE_VERSION = "2";
+export const AEM_PROFILE_VERSION = "3";
 
 function readText(path: string): string {
   try {
@@ -29,12 +29,13 @@ function filesUnder(root: string): string[] {
 
 function moduleKind(name: string, files: string[]): AemModule["kind"] {
   const value = name.toLowerCase();
-  if (value.includes("frontend") || files.some((file) => /(^|[\\/])src[\\/](components|main)[\\/]/.test(file))) return "frontend";
+  if (value === "core") return "backend";
+  if (value.includes("apps")) return "application";
   if (value.includes("content")) return "content";
   if (value.includes("dispatcher")) return "dispatcher";
   if (value.includes("test")) return "test";
-  if (value === "core" || files.some((file) => file.endsWith(".java"))) return "backend";
-  if (value.includes("apps")) return "application";
+  if (value.includes("frontend") || files.some((file) => /(^|[\\/])src[\\/]main[\\/]webpack[\\/]/.test(file))) return "frontend";
+  if (files.some((file) => file.endsWith(".java"))) return "backend";
   return "other";
 }
 

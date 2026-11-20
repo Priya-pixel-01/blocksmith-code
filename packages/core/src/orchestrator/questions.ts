@@ -12,7 +12,17 @@ export function requiresAemImplementationMode(projectType: string): boolean {
 }
 
 export function questionsForAemSpec(spec: AemComponentSpec): OpenQuestion[] {
-  return questionsFromPrompts(spec.openQuestions);
+  const questions = questionsFromPrompts(spec.openQuestions);
+  if (spec.reuseDecision.decision === "create" && !spec.parentPath) {
+    return [{
+      id: "component-parent-path",
+      prompt: "Where should this new AEM component be created? Enter a repository-relative parent folder path; Blocksmith adds the component folder named after the component inside it. For example, enter ui.apps/src/main/content/jcr_root/apps/wknd/components to create the component under that folder.",
+      kind: "text",
+      options: [],
+      required: true,
+    }, ...questions];
+  }
+  return questions;
 }
 
 export function questionsFromPrompts(prompts: string[]): OpenQuestion[] {

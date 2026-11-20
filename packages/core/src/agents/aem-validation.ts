@@ -27,6 +27,10 @@ function validateArtifactPath(path: string, profile: RepoProfile, spec: AemCompo
     errors.push(`AEM artifact path must be a concrete repository-relative path: ${path || "<empty>"}`);
     return;
   }
+  if (/clientlib\.html/i.test(path)) {
+    errors.push(`The shared Granite clientlib.html template is referenced by HTL and must not be listed as a component artifact: ${path}`);
+    return;
+  }
   if (isForbiddenSourcePath(path)) {
     errors.push(`Invalid AEM source location: ${path}. Aggregate, structure, and EDS source paths are not valid component implementation destinations.`);
     return;

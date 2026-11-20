@@ -22,11 +22,12 @@ import type { SourceArtifact } from "../schemas/source.js";
 import type { BlockSpec } from "../schemas/block-spec.js";
 import type { AemComponentSpec } from "../schemas/aem-spec.js";
 import type { AemPlan } from "../schemas/aem-plan.js";
-import type { Plan } from "../schemas/plan.js";
+import type { Plan, ReuseDecision } from "../schemas/plan.js";
 import type { VerdictReport } from "../schemas/verdict.js";
 import type { JobEvent, JobStatus } from "../schemas/job.js";
 import type { AemImplementationMode, OpenQuestionAnswer } from "../schemas/question.js";
 import { applyAemImplementationMode, formatAnswers, questionsForAemSpec, questionsFromPrompts } from "./questions.js";
+import { GENERIC_DESTINATION_QUESTION_ID, genericDestinationQuestion, normalizeGenericDestination } from "./generic-project.js";
 import { appendAgentTraceRecord, captureTraceArtifacts, sourceTraceSummary, type AgentTraceModels } from "./agent-trace.js";
 
 const MAX_BUILD_VERIFY_ITERATIONS = 3;
@@ -149,6 +150,31 @@ export class JobRunner {
       this.deps.jobs.addCost(job.id, interpretCost);
       this.emit(job.id, "agent-message", "interpreter", `Proposed block: ${blockSpec.blockNameCandidate}`, { output: blockSpec });
 
+      if (repoProfile.projectType === "unknown") {
+        const questions = [
+          genericDestinationQuestion(),
+          ...questionsFromPrompts(blockSpec.openQuestions),
+        ];
+        const reuseDecision: ReuseDecision = {
+          decision: "create",
+          targetBlock: null,
+          rationale: "No supported project adapter was detected; create a standalone component in the user-selected folder.",
+          confidence: 1,
+          category: "new-component-required",
+          evidence: ["Project classification is unknown."],
+          gaps: ["Framework-specific application wiring is unavailable in the generic fallback."],
+        };
+        this.deps.jobs.update(job.id, {
+          blockSpecJson: JSON.stringify(blockSpec),
+          reuseDecisionJson: JSON.stringify(reuseDecision),
+          openQuestionsJson: JSON.stringify(questions),
+          questionAnswersJson: JSON.stringify([]),
+        });
+        this.transition(job.id, "awaiting_answers");
+        this.emit(job.id, "agent-message", "orchestrator", "This repository does not match the supported AEM or EDS structures. Select a destination folder before planning files.", { questions, fallback: "standalone-html-css-js" });
+        return;
+      }
+
       this.emit(job.id, "agent-message", "reuse", "EDS reuse analysis input.", { input: { blockSpec, repositoryProfile: repoProfile.blocks } });
       const { reuseDecision, costUsd: reuseCost } = await analyzeReuse({ root: workspace.rootPath, repoProfile, blockSpec, router: this.deps.router });
       this.deps.jobs.update(job.id, { reuseDecisionJson: JSON.stringify(reuseDecision), openQuestionsJson: JSON.stringify([]), questionAnswersJson: JSON.stringify([]) });
@@ -193,11 +219,67 @@ export class JobRunner {
     const answerFeedback = [`## User answers before planning\n${formatAnswers(job.openQuestions, answers)}`, additionalFeedback.trim() ? `## Additional user feedback\n${additionalFeedback.trim()}` : ""].filter(Boolean).join("\n\n");
     const workspace = this.deps.workspaces.get(job.workspaceId);
     if (!workspace?.repoProfile || !job.blockSpec) throw new Error(`Job ${jobId} is missing its repository profile or component specification`);
+    if (workspace.repoProfile.projectType === "unknown") {
+      const savedSpec = job.blockSpec as BlockSpec;
+      const destinationAnswer = answers.find((answer) => answer.questionId === GENERIC_DESTINATION_QUESTION_ID);
+      const targetDirectory = destinationAnswer
+        ? normalizeGenericDestination(destinationAnswer.value)
+        : savedSpec.targetDirectory;
+      if (targetDirectory === undefined || targetDirectory === null) {
+        throw new Error("Choose a destination folder before planning files for this repository.");
+      }
+      const updatedSpec: BlockSpec = { ...savedSpec, targetDirectory, openQuestions: [] };
+      const reuseDecision: ReuseDecision = {
+        decision: "create",
+        targetBlock: null,
+        rationale: "No supported project adapter was detected; create a standalone component in the user-selected folder.",
+        confidence: 1,
+        category: "new-component-required",
+        evidence: ["Project classification is unknown."],
+        gaps: ["Framework-specific application wiring is unavailable in the generic fallback."],
+      };
+      this.deps.jobs.update(job.id, {
+        blockSpecJson: JSON.stringify(updatedSpec),
+        reuseDecisionJson: JSON.stringify(reuseDecision),
+        openQuestionsJson: JSON.stringify([]),
+        questionAnswersJson: JSON.stringify(answers),
+        feedback: [job.feedback, answerFeedback].filter(Boolean).join("\n\n---\n\n"),
+      });
+      this.emit(job.id, "agent-message", "human", "Generic project destination selected.", { targetDirectory: targetDirectory || ".", answers });
+      this.transition(job.id, "planning");
+      try {
+        const { plan, costUsd } = await createPlan({
+          jobId: job.id,
+          repoProfile: workspace.repoProfile,
+          blockSpec: updatedSpec,
+          reuseDecision,
+          router: this.deps.router,
+          feedback: answerFeedback,
+        });
+        this.deps.jobs.addCost(job.id, costUsd);
+        this.emit(job.id, "agent-message", "planner", "Standalone component plan created.", { output: plan });
+        this.advanceAemPlan(job.id, plan);
+      } catch (err) {
+        if (this.isCancellationRequested(job.id)) throw err;
+        const message = err instanceof Error ? err.message : String(err);
+        this.emit(job.id, "error", "planner", message);
+        this.transition(job.id, "failed", message);
+        throw err;
+      }
+      return;
+    }
     if (!["aem", "mixed"].includes(workspace.repoProfile.projectType)) throw new Error("Pre-planning answers are currently supported for AEM jobs only");
 
     const implementationMode: AemImplementationMode = job.implementationMode ?? "properties";
     const savedSpec = job.blockSpec as AemComponentSpec;
-    const updatedSpec = applyAemImplementationMode({ ...savedSpec, requirements: [...savedSpec.requirements, answerFeedback], openQuestions: [] }, implementationMode, workspace.repoProfile);
+    const parentPathAnswer = answers.find((answer) => answer.questionId === "component-parent-path");
+    const selectedParentPath = parentPathAnswer?.value.trim();
+    const updatedSpec = applyAemImplementationMode({
+      ...savedSpec,
+      parentPath: selectedParentPath ? selectedParentPath : savedSpec.parentPath ?? null,
+      requirements: [...savedSpec.requirements, answerFeedback],
+      openQuestions: [],
+    }, implementationMode, workspace.repoProfile);
     const reuseRequest = {
       name: updatedSpec.name,
       implementationMode,
@@ -295,6 +377,53 @@ export class JobRunner {
       this.deps.jobs.addCost(job.id, interpretCost);
       this.emit(job.id, "agent-message", "interpreter", "Revised block specification.", { output: blockSpec, feedback: accumulatedFeedback });
 
+      if (workspace.repoProfile.projectType === "unknown") {
+        const previousSpec = job.blockSpec as BlockSpec;
+        const destination = previousSpec.targetDirectory;
+        const reuseDecision: ReuseDecision = {
+          decision: "create",
+          targetBlock: null,
+          rationale: "No supported project adapter was detected; create a standalone component in the user-selected folder.",
+          confidence: 1,
+          category: "new-component-required",
+          evidence: ["Project classification is unknown."],
+          gaps: ["Framework-specific application wiring is unavailable in the generic fallback."],
+        };
+        const revisedSpec: BlockSpec = { ...blockSpec, targetDirectory: destination ?? null };
+        if (destination === undefined || destination === null) {
+          const questions = [genericDestinationQuestion(), ...questionsFromPrompts(revisedSpec.openQuestions)];
+          this.deps.jobs.update(job.id, {
+            blockSpecJson: JSON.stringify(revisedSpec),
+            reuseDecisionJson: JSON.stringify(reuseDecision),
+            openQuestionsJson: JSON.stringify(questions),
+            questionAnswersJson: JSON.stringify([]),
+          });
+          this.transition(job.id, "awaiting_answers");
+          this.emit(job.id, "agent-message", "orchestrator", "Select a destination folder before replanning this generic component.", { questions });
+          return;
+        }
+        revisedSpec.openQuestions = [];
+        this.deps.jobs.update(job.id, {
+          blockSpecJson: JSON.stringify(revisedSpec),
+          reuseDecisionJson: JSON.stringify(reuseDecision),
+          openQuestionsJson: JSON.stringify([]),
+          questionAnswersJson: JSON.stringify([]),
+        });
+        this.transition(job.id, "planning");
+        const { plan, costUsd: planCost } = await createPlan({
+          jobId: job.id,
+          repoProfile: workspace.repoProfile,
+          blockSpec: revisedSpec,
+          reuseDecision,
+          router: this.deps.router,
+          feedback: accumulatedFeedback,
+        });
+        this.deps.jobs.addCost(job.id, planCost);
+        this.emit(job.id, "agent-message", "planner", "Revised standalone component plan created.", { output: plan });
+        this.advanceAemPlan(job.id, plan);
+        return;
+      }
+
       const { reuseDecision, costUsd: reuseCost } = await analyzeReuse({
         root: workspace.rootPath,
         repoProfile: workspace.repoProfile,
@@ -346,6 +475,9 @@ export class JobRunner {
     if (!job.plan) {
       throw new Error(`Job ${jobId} is missing its plan ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cannot build`);
     }
+    if (!job.sourceArtifact) {
+      throw new Error(`Job ${jobId} is missing its source artifact — cannot build`);
+    }
 
     const workspace = this.deps.workspaces.get(job.workspaceId);
     if (!workspace?.repoProfile) {
@@ -378,6 +510,7 @@ export class JobRunner {
         repoProfile: workspace.repoProfile,
         blockSpec: job.blockSpec as BlockSpec,
         plan,
+        sourceArtifact: job.sourceArtifact as SourceArtifact,
         router,
       });
       this.deps.jobs.addCost(job.id, build.costUsd);
@@ -395,6 +528,7 @@ export class JobRunner {
         filesToCreate: plan.filesToCreate,
         filesToModify: plan.filesToModify,
         writeDirectly: true,
+        allowGenericPaths: workspace.repoProfile.projectType === "unknown",
       });
       this.deps.jobs.update(job.id, { writeResultJson: JSON.stringify(write), resultBranch: write.branchName });
       this.emit(job.id, "agent-message", "writer", write.mode === "git-commit" ? `Committed to branch ${write.branchName} (${write.commitSha?.slice(0, 8)})` : `Written directly to ${workspace.rootPath}${write.backupDir ? ` (originals backed up to ${write.backupDir})` : ""}`);
@@ -463,7 +597,7 @@ export class JobRunner {
       for (let iteration = 1; iteration <= MAX_BUILD_VERIFY_ITERATIONS; iteration++) {
         this.transition(job.id, "building");
         this.emit(job.id, "agent-message", "builder", `Builder input, iteration ${iteration}.`, { input: { blockSpec: job.blockSpec, plan, feedback } });
-        const build = await buildBlock({ workspaceDir: jobWorkspace.dir, repoProfile: workspace.repoProfile, blockSpec: job.blockSpec as BlockSpec, plan, router, feedback });
+        const build = await buildBlock({ workspaceDir: jobWorkspace.dir, repoProfile: workspace.repoProfile, blockSpec: job.blockSpec as BlockSpec, plan, sourceArtifact, router, feedback });
         this.deps.jobs.addCost(job.id, build.costUsd);
         this.emit(job.id, "agent-message", "builder", `Iteration ${iteration}: wrote ${build.filesWritten.length}/${build.filesWritten.length + build.filesMissing.length} planned files. ${build.summary}`, { iteration, output: build, artifacts: captureTraceArtifacts(jobWorkspace.dir, build.filesWritten) });
         if (build.filesMissing.length > 0) {
@@ -506,6 +640,7 @@ export class JobRunner {
         blockName: plan.blockName,
         filesToCreate: plan.filesToCreate,
         filesToModify: plan.filesToModify,
+        allowGenericPaths: workspace.repoProfile.projectType === "unknown",
       });
       this.deps.jobs.update(job.id, { writeResultJson: JSON.stringify(write), resultBranch: write.branchName });
       this.emit(job.id, "agent-message", "writer", write.mode === "git-commit" ? `Committed to branch ${write.branchName} (${write.commitSha?.slice(0, 8)})` : `Written directly to ${workspace.rootPath}${write.backupDir ? ` (originals backed up to ${write.backupDir})` : ""}`);
@@ -524,7 +659,7 @@ export class JobRunner {
   }
 
   private async approveAemCodeOnly(job: NonNullable<ReturnType<JobRepository["getJob"]>>, rootPath: string, isGitRepo: boolean, repoProfile: NonNullable<ReturnType<WorkspaceRepository["get"]>>["repoProfile"]): Promise<void> {
-    if (!job.plan || !job.blockSpec || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, or repository profile`);
+    if (!job.plan || !job.blockSpec || !job.sourceArtifact || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, source artifact, or repository profile`);
     const plan = job.plan as AemPlan;
     const componentSpec = job.blockSpec as AemComponentSpec;
     if (plan.reuseDecision.decision === "reuse" && plan.filePlan.filesToCreate.length === 0 && plan.filePlan.filesToModify.length === 0) {
@@ -538,7 +673,7 @@ export class JobRunner {
       this.deps.jobs.update(job.id, { workspaceDir: jobWorkspace.dir });
       this.transition(job.id, "building");
       this.emit(job.id, "agent-message", "aem-builder", "AEM builder input.", { input: { componentSpec, plan, approvedFiles: [...plan.filePlan.filesToCreate, ...plan.filePlan.filesToModify] } });
-      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, router: this.deps.router });
+      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, sourceArtifact: job.sourceArtifact as SourceArtifact, router: this.deps.router });
       this.deps.jobs.addCost(job.id, build.costUsd);
       this.emit(job.id, "agent-message", "aem-builder", `Code-only mode: wrote ${build.filesWritten.length}/${build.filesWritten.length + build.filesMissing.length} planned AEM files.`, { output: build, artifacts: captureTraceArtifacts(jobWorkspace.dir, build.filesWritten) });
       this.transition(job.id, "writing");
@@ -557,7 +692,7 @@ export class JobRunner {
     }
   }
 
-  private advanceAemPlan(jobId: string, plan: AemPlan): void {
+  private advanceAemPlan(jobId: string, plan: Plan | AemPlan): void {
     const questions = questionsFromPrompts(plan.openQuestions);
     this.deps.jobs.update(jobId, {
       planJson: JSON.stringify(plan),
@@ -573,7 +708,7 @@ export class JobRunner {
   }
 
   private async runApprovedAemPipeline(job: NonNullable<ReturnType<JobRepository["getJob"]>>, rootPath: string, isGitRepo: boolean, repoProfile: NonNullable<ReturnType<WorkspaceRepository["get"]>>["repoProfile"]): Promise<void> {
-    if (!job.plan || !job.blockSpec || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, or repository profile`);
+    if (!job.plan || !job.blockSpec || !job.sourceArtifact || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, source artifact, or repository profile`);
     const plan = job.plan as AemPlan;
     const componentSpec = job.blockSpec as AemComponentSpec;
     if (plan.reuseDecision.decision === "reuse" && plan.filePlan.filesToCreate.length === 0 && plan.filePlan.filesToModify.length === 0) {
@@ -586,7 +721,7 @@ export class JobRunner {
       jobWorkspace = await createJobWorkspace({ targetRoot: rootPath, scratchDir: this.deps.scratchDir, jobId: job.id, blockName: plan.componentName, isGitRepo });
       this.deps.jobs.update(job.id, { workspaceDir: jobWorkspace.dir });
       this.transition(job.id, "building");
-      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, router: this.deps.router });
+      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, sourceArtifact: job.sourceArtifact as SourceArtifact, router: this.deps.router });
       this.deps.jobs.addCost(job.id, build.costUsd);
       this.emit(job.id, "agent-message", "aem-builder", `Generated ${build.filesWritten.length}/${build.filesWritten.length + build.filesMissing.length} planned AEM files. Lint: ${build.lint.passed ? "pass" : "fail"}.`, { output: build, artifacts: captureTraceArtifacts(jobWorkspace.dir, build.filesWritten) });
       this.transition(job.id, "verifying");
@@ -631,8 +766,8 @@ export class JobRunner {
     if (job.status !== "deployed" && job.status !== "done") {
       throw new Error(`Job ${jobId} is not deployed (status: ${job.status}) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cannot refine`);
     }
-    if (!job.plan || !job.blockSpec) {
-      throw new Error(`Job ${jobId} is missing plan or blockSpec ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â cannot refine`);
+    if (!job.plan || !job.blockSpec || !job.sourceArtifact) {
+      throw new Error(`Job ${jobId} is missing plan, blockSpec, or source artifact — cannot refine`);
     }
 
     const workspace = this.deps.workspaces.get(job.workspaceId);
@@ -669,6 +804,7 @@ export class JobRunner {
         repoProfile: workspace.repoProfile,
         blockSpec,
         plan,
+        sourceArtifact: job.sourceArtifact as SourceArtifact,
         router: this.deps.router,
         feedback: accumulatedFeedback,
       });
@@ -702,6 +838,7 @@ export class JobRunner {
         blockName: plan.blockName,
         filesToCreate: plan.filesToCreate,
         filesToModify: plan.filesToModify,
+        allowGenericPaths: workspace.repoProfile.projectType === "unknown",
       });
       this.deps.jobs.update(job.id, { writeResultJson: JSON.stringify(write), resultBranch: write.branchName });
       this.emit(job.id, "agent-message", "writer", write.mode === "git-commit" ? `Committed post-feedback changes to branch ${write.branchName} (${write.commitSha?.slice(0, 8)})` : `Written post-feedback changes to ${workspace.rootPath}`);
@@ -720,7 +857,7 @@ export class JobRunner {
   }
 
   private async runAemPostFeedbackRefinement(job: NonNullable<ReturnType<JobRepository["getJob"]>>, postFeedback: string, rootPath: string, isGitRepo: boolean, repoProfile: NonNullable<ReturnType<WorkspaceRepository["get"]>>["repoProfile"]): Promise<void> {
-    if (!job.plan || !job.blockSpec || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, or repository profile`);
+    if (!job.plan || !job.blockSpec || !job.sourceArtifact || !repoProfile) throw new Error(`AEM job ${job.id} is missing its plan, specification, source artifact, or repository profile`);
     const plan = job.plan as AemPlan;
     const componentSpec = job.blockSpec as AemComponentSpec;
     const accumulatedFeedback = job.feedback ? `${job.feedback}\n\n---\n\n${postFeedback}` : postFeedback;
@@ -729,7 +866,7 @@ export class JobRunner {
       jobWorkspace = await createJobWorkspace({ targetRoot: rootPath, scratchDir: this.deps.scratchDir, jobId: job.id, blockName: plan.componentName, isGitRepo });
       this.deps.jobs.update(job.id, { workspaceDir: jobWorkspace.dir });
       this.transition(job.id, "post_feedback_building");
-      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, router: this.deps.router, feedback: accumulatedFeedback });
+      const build = await buildAemComponent({ workspaceDir: jobWorkspace.dir, repoProfile, componentSpec, plan, sourceArtifact: job.sourceArtifact as SourceArtifact, router: this.deps.router, feedback: accumulatedFeedback });
       this.deps.jobs.addCost(job.id, build.costUsd);
       this.transition(job.id, "writing");
       const write = await writeResult({ targetRoot: rootPath, workspace: jobWorkspace, jobId: job.id, blockName: plan.componentName, filesToCreate: plan.filePlan.filesToCreate, filesToModify: plan.filePlan.filesToModify });

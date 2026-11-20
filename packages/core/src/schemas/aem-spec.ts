@@ -21,6 +21,7 @@ export const AemComponentSpecSchema = z.object({
   requiredModules: z.array(z.string()),
   requiredFiles: z.array(z.string()),
   dependencies: z.array(z.string()),
+  parentPath: z.string().nullable().optional(),
   implementation: AemImplementationSchema,
   acceptanceCriteria: z.array(z.string()),
   openQuestions: z.array(z.string()),

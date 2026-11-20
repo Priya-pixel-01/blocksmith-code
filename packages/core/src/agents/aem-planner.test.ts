@@ -51,6 +51,15 @@ test("without a frontend module, plan browser assets and clientlib manifests ins
   assert.deepEqual(validateAEMImplementationPlan(profile, SPEC, { filePlan: plan } as AemPlan), { isValid: true, errors: [] });
 });
 
+test("computeAEMFilePlan honors a user-selected parent folder path", async () => {
+  const profile = await buildRepoProfile(FIXTURE_ROOT);
+  const plan = computeAEMFilePlan(profile, { ...SPEC, parentPath: "ui.apps/src/main/content/jcr_root/apps/blocksmith/components/blocksmith-demo-compo", name: "new-card" });
+
+  assert.ok(plan.filesToCreate.some((path) => path.includes("/blocksmith-demo-compo/new-card/new-card.html")));
+  assert.ok(plan.filesToCreate.some((path) => path.includes("/blocksmith-demo-compo/new-card/clientlib/css/new-card.css")));
+  assert.ok(plan.filesToCreate.every((path) => !path.includes("/components/new-card/")));
+});
+
 test("CSS-only local clientlibs do not plan a JavaScript manifest", async () => {
   const original = await buildRepoProfile(FIXTURE_ROOT);
   const profile = { ...original, modules: original.modules.filter((module) => module.kind !== "frontend") };

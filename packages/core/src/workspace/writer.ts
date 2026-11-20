@@ -32,6 +32,7 @@ export interface WriteResultOptions {
   filesToCreate: string[];
   filesToModify: string[];
   writeDirectly?: boolean;
+  allowGenericPaths?: boolean;
 }
 
 export interface WriteResult {
@@ -50,7 +51,9 @@ export interface WriteResult {
  * overwrite to .blocksmith/backup/<jobId>/ first.
  */
 export async function writeResult(options: WriteResultOptions): Promise<WriteResult> {
-  const allowedPaths = [...new Set([...options.filesToCreate, ...options.filesToModify])].filter(isAllowedWriterPath);
+  const allowedPaths = [...new Set([...options.filesToCreate, ...options.filesToModify])].filter(
+    (path) => isAllowedWriterPath(path) || (options.allowGenericPaths && isSafeRepoRelativePath(path)),
+  );
   if (allowedPaths.length === 0) {
     throw new Error("Writer: no files to write — the plan's file list was empty or none passed the path allowlist");
   }
@@ -64,6 +67,16 @@ export async function writeResult(options: WriteResultOptions): Promise<WriteRes
     return commitInWorktree(options, existingInWorkspace);
   }
   return directWrite(options, existingInWorkspace);
+}
+
+function isSafeRepoRelativePath(path: string): boolean {
+  const normalized = path.replaceAll("\\", "/");
+  return (
+    normalized.length > 0 &&
+    !normalized.startsWith("/") &&
+    !/^[a-zA-Z]:/.test(normalized) &&
+    !normalized.split("/").some((segment) => !segment || segment === "." || segment === "..")
+  );
 }
 
 async function commitInWorktree(options: WriteResultOptions, files: string[]): Promise<WriteResult> {

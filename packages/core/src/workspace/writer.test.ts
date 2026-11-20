@@ -28,6 +28,60 @@ test("isAllowedWriterPath allows EDS and standard AEM paths; rejects unrelated f
   assert.equal(isAllowedWriterPath("../../etc/passwd"), false);
 });
 
+test("writeResult permits only planned repository-relative generic paths when explicitly enabled", async () => {
+  const targetRoot = mkdtempSync(join(tmpdir(), "blocksmith-writer-generic-"));
+  const scratchDir = mkdtempSync(join(tmpdir(), "blocksmith-writer-generic-scratch-"));
+  try {
+    const jobId = "job_writer_generic";
+    const workspace = await createJobWorkspace({ targetRoot, scratchDir, jobId, blockName: "hero", isGitRepo: false });
+    const relativePath = "src/components/hero/hero.html";
+    mkdirSync(join(workspace.dir, "src", "components", "hero"), { recursive: true });
+    writeFileSync(join(workspace.dir, ...relativePath.split("/")), "<main>Hero</main>");
+
+    await assert.rejects(
+      writeResult({
+        targetRoot,
+        workspace,
+        jobId,
+        blockName: "hero",
+        filesToCreate: [relativePath],
+        filesToModify: [],
+      }),
+      /no files to write/,
+    );
+
+    const result = await writeResult({
+      targetRoot,
+      workspace,
+      jobId,
+      blockName: "hero",
+      filesToCreate: [relativePath],
+      filesToModify: [],
+      allowGenericPaths: true,
+    });
+    assert.deepEqual(result.filesWritten, [relativePath]);
+    assert.equal(readFileSync(join(targetRoot, ...relativePath.split("/")), "utf-8"), "<main>Hero</main>");
+
+    await assert.rejects(
+      writeResult({
+        targetRoot,
+        workspace,
+        jobId,
+        blockName: "hero",
+        filesToCreate: ["../outside.html"],
+        filesToModify: [],
+        allowGenericPaths: true,
+      }),
+      /no files to write/,
+    );
+
+    await removeJobWorkspace(targetRoot, workspace);
+  } finally {
+    rmSync(targetRoot, { recursive: true, force: true });
+    rmSync(scratchDir, { recursive: true, force: true });
+  }
+});
+
 test("writeResult on a git repo commits exactly the planned files onto the worktree's real branch", async () => {
   const gitDir = mkdtempSync(join(tmpdir(), "blocksmith-writer-git-"));
   const scratchDir = mkdtempSync(join(tmpdir(), "blocksmith-writer-scratch-"));

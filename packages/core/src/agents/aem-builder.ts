@@ -3,12 +3,14 @@ import { basename } from "node:path";
 import { tool } from "ai";
 import type { ModelRouter } from "../llm/router.js";
 import type { RepoProfile } from "../schemas/repo-profile.js";
+import type { SourceArtifact } from "../schemas/source.js";
 import type { AemComponentSpec } from "../schemas/aem-spec.js";
 import type { AemPlan } from "../schemas/aem-plan.js";
 import { createFsTools } from "../tools/fs.js";
 import { createRunLintTool, runLint, type LintResult } from "../tools/lint.js";
 import { resolveInSandbox } from "../tools/sandbox.js";
 import { AEM_BUILDER_PROMPT } from "./aem-prompts.js";
+import { designSourceMessages } from "./design-source-messages.js";
 import { assertAEMValidation, validateAEMImplementationPlan } from "./aem-validation.js";
 
 export interface BuildAemOptions {
@@ -16,6 +18,7 @@ export interface BuildAemOptions {
   repoProfile: RepoProfile;
   componentSpec: AemComponentSpec;
   plan: AemPlan;
+  sourceArtifact: SourceArtifact;
   router: ModelRouter;
   feedback?: string;
 }
@@ -28,22 +31,46 @@ export interface BuildAemResult {
   costUsd: number | null;
 }
 
-export async function buildAemComponent({ workspaceDir, repoProfile, componentSpec, plan, router, feedback }: BuildAemOptions): Promise<BuildAemResult> {
+export async function buildAemComponent({ workspaceDir, repoProfile, componentSpec, plan, sourceArtifact, router, feedback }: BuildAemOptions): Promise<BuildAemResult> {
   assertAEMValidation(validateAEMImplementationPlan(repoProfile, componentSpec, plan), "AEM implementation plan");
   const allowedPaths = [...plan.filePlan.filesToCreate, ...plan.filePlan.filesToModify];
   const tools = createAemBuilderTools(workspaceDir, repoProfile, allowedPaths);
-  const loop = await router.runAgentLoop({
+  const basePrompt =
+    `## Repository profile\n${repoProfile.digestMarkdown}\n\n## Component specification\n${JSON.stringify(componentSpec, null, 2)}\n\n## Approved file plan\n${JSON.stringify(plan.filePlan, null, 2)}\n\n## Approved files\n${allowedPaths.map((path) => `- ${path}`).join("\n")}\n${feedback ? `\n## Verification feedback\n${feedback}` : ""}\n\nImplement the component now. Read sibling components first and run lint before finishing.`;
+  const runBuilder = async (prompt: string) => router.runAgentLoop({
     role: "builder",
     system: AEM_BUILDER_PROMPT,
-    prompt: `## Repository profile\n${repoProfile.digestMarkdown}\n\n## Component specification\n${JSON.stringify(componentSpec, null, 2)}\n\n## Approved file plan\n${JSON.stringify(plan.filePlan, null, 2)}\n\n## Approved files\n${allowedPaths.map((path) => `- ${path}`).join("\n")}\n${feedback ? `\n## Verification feedback\n${feedback}` : ""}\n\nImplement the component now. Read sibling components first and run lint before finishing.`,
+    messages: await designSourceMessages(prompt, sourceArtifact),
     tools,
     maxSteps: 24,
   });
-  const filesWritten = allowedPaths.filter((path) => existsSync(resolveInSandbox(workspaceDir, path)));
+  let loop = await runBuilder(basePrompt);
+  let filesWritten = allowedPaths.filter((path) => existsSync(resolveInSandbox(workspaceDir, path)));
+  try {
+    validateGeneratedAemContracts(workspaceDir, plan, filesWritten);
+  } catch (error) {
+    if (!isMissingSlingModelResourceTypeError(error)) throw error;
+    const correction = error.message;
+    const repairLoop = await runBuilder(
+      `${basePrompt}\n\n## Required correction\nThe previous generated files failed this contract check:\n${correction}\nRead the existing implementation file, then correct only that file so it has a valid @Model annotation with the exact resourceType from the component specification. Keep the approved package, class, and interface unchanged. Do not finish until the corrected file is written.`,
+    );
+    loop = {
+      ...repairLoop,
+      text: `${loop.text}\n\nCorrection attempt:\n${repairLoop.text}`,
+      costUsd: loop.costUsd !== null && repairLoop.costUsd !== null ? loop.costUsd + repairLoop.costUsd : null,
+    };
+    filesWritten = allowedPaths.filter((path) => existsSync(resolveInSandbox(workspaceDir, path)));
+    validateGeneratedAemContracts(workspaceDir, plan, filesWritten);
+  }
   const filesMissing = allowedPaths.filter((path) => !filesWritten.includes(path));
-  validateGeneratedAemContracts(workspaceDir, plan, filesWritten);
   const lint = await runLint(workspaceDir, repoProfile.conventions.lintCommand);
   return { filesWritten, filesMissing, lint, summary: loop.text, costUsd: loop.costUsd };
+}
+
+function isMissingSlingModelResourceTypeError(error: unknown): error is Error {
+  return error instanceof Error &&
+    error.message.startsWith("Generated Sling Model implementation ") &&
+    error.message.includes(" must declare @Model for resource type ");
 }
 
 export function validateGeneratedAemContracts(workspaceDir: string, plan: AemPlan, filesWritten: string[]): void {

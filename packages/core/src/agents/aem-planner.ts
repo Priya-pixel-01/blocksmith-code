@@ -18,8 +18,17 @@ function moduleByKind(profile: RepoProfile, kinds: string[], fallback: string): 
 function componentRoot(profile: RepoProfile, spec: AemComponentSpec, decision: AemReuseDecision): string {
   const existing = decision.targetComponent ? profile.aemComponents.find((component) => component.id === decision.targetComponent) : undefined;
   if (existing) return existing.path;
+
   const module = moduleByKind(profile, ["application", "content"], "ui.apps");
   const appName = (spec.implementation.resourceType?.split("/")[0] || "apps").replace(/[^a-zA-Z0-9_-]/g, "");
+  const explicitParent = spec.parentPath?.trim();
+  if (explicitParent) {
+    const normalizedParent = explicitParent.replaceAll("\\", "/").replace(/\/+$/, "");
+    if (normalizedParent.includes("/components/")) {
+      return `${normalizedParent}/${spec.name}`;
+    }
+    return `${normalizedParent}/components/${spec.name}`;
+  }
   return `${module}/src/main/content/jcr_root/apps/${appName}/components/${spec.name}`;
 }
 
@@ -74,9 +83,16 @@ export function computeAEMFilePlan(profile: RepoProfile, spec: AemComponentSpec,
     for (const file of spec.implementation.backend) addFile(filesToReuse, backendArtifactPath(file, backendModule));
   } else {
     const componentFiles = reuseDecision.decision === "create" ? filesToCreate : filesToModify;
-    for (const file of spec.implementation.htl) addFile(componentFiles, componentArtifactPath(file, root, `${spec.name}.html`));
+    for (const file of spec.implementation.htl) {
+      const name = fileName(file, `${spec.name}.html`);
+      if (/\.(scss|sass|css|js|ts)$/i.test(name)) {
+        addFile(componentFiles, frontendArtifactPath(file, frontendModule, spec.name, root));
+      } else {
+        addFile(componentFiles, componentArtifactPath(file, root, `${spec.name}.html`));
+      }
+    }
     for (const file of spec.implementation.dialog) addFile(componentFiles, dialogArtifactPath(file, root));
-    if (spec.implementation.htl.length === 0) addFile(componentFiles, `${root}/${spec.name}.html`);
+    if (!spec.implementation.htl.some((file) => fileName(file, `${spec.name}.html`).endsWith(".html"))) addFile(componentFiles, `${root}/${spec.name}.html`);
     if (spec.implementation.dialog.length > 0) addFile(componentFiles, `${root}/_cq_dialog/.content.xml`);
     addFile((reuseDecision.decision === "create" ? filesToCreate : filesToModify), `${root}/.content.xml`);
   }
@@ -87,7 +103,9 @@ export function computeAEMFilePlan(profile: RepoProfile, spec: AemComponentSpec,
     for (const file of spec.implementation.backend) addFile(generatedFiles, backendArtifactPath(file, backendModule));
   }
 
-  if (!frontendModule && spec.implementation.frontend.length > 0) {
+  const hasLocalAssets = [...filesToCreate, ...filesToModify, ...filesToReuse].some((path) =>
+    path.startsWith(`${root}/clientlib/css/`) || path.startsWith(`${root}/clientlib/js/`));
+  if (!frontendModule && hasLocalAssets) {
     const files = reuseDecision.decision === "reuse" ? filesToReuse : reuseDecision.decision === "create" ? filesToCreate : filesToModify;
     addFile(files, `${root}/clientlib/.content.xml`);
     if ([...files].some((path) => path.startsWith(`${root}/clientlib/css/`))) addFile(files, `${root}/clientlib/css.txt`);

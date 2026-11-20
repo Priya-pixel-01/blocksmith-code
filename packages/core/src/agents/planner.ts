@@ -1,9 +1,12 @@
 import { z } from "zod";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { PlanSchema, type Plan, type ReuseDecision } from "../schemas/plan.js";
 import type { BlockSpec } from "../schemas/block-spec.js";
 import type { RepoProfile } from "../schemas/repo-profile.js";
 import type { ModelRouter } from "../llm/router.js";
 import { validateUEFields } from "../schemas/field-validation.js";
+import { normalizeGenericDestination } from "../orchestrator/generic-project.js";
 
 /**
  * Only the genuinely interpretive parts of a plan go through the model: a readable summary,
@@ -55,10 +58,10 @@ export async function createPlan({ jobId, repoProfile, blockSpec, reuseDecision,
     schema: PlanNarrativeSchema,
     schemaName: "PlanNarrative",
     system:
-      "You are the Planner for Blocksmith. You write the plan a human reviews and approves before any code is " +
-      "written for a new or modified Adobe Edge Delivery Services block. Be concrete and specific — this is what " +
-      "the human uses to decide whether to proceed, not marketing copy. Flag real risks (e.g. changing a block " +
-      "used elsewhere on the site) rather than omitting them.\n\n" +
+      (repoProfile.projectType === "unknown"
+        ? "You are planning a standalone, framework-neutral HTML/CSS/JavaScript component in a user-selected folder of an unsupported project. Do not claim it is integrated into the application."
+        : "You are the Planner for Blocksmith. You write the plan a human reviews and approves before any code is written for a new or modified Adobe Edge Delivery Services block.") +
+      " Be concrete and specific — this is what the human uses to decide whether to proceed, not marketing copy. Flag real risks rather than omitting them.\n\n" +
       "CRITICAL: If human feedback is present, it represents explicit rejection of the previous approach. " +
       "Acknowledge the feedback explicitly in your summary, explain how you are addressing it, and " +
       "reconsider whether the proposed reuse decision still aligns with the human's feedback. " +
@@ -125,6 +128,35 @@ export function computeFilePlan(
   blockSpec: BlockSpec,
   reuseDecision: ReuseDecision,
 ): { filesToCreate: string[]; filesToModify: string[]; adjustedBlockName: string } {
+  if (repoProfile.projectType === "unknown") {
+    if (reuseDecision.decision !== "create") {
+      throw new Error("Unsupported project structures require a new standalone component; reuse and variant planning are unavailable.");
+    }
+    if (blockSpec.targetDirectory === undefined || blockSpec.targetDirectory === null) {
+      throw new Error("A destination folder must be selected before planning files for an unsupported project structure.");
+    }
+
+    const destination = normalizeGenericDestination(blockSpec.targetDirectory);
+    const baseName = blockSpec.blockNameCandidate.toLowerCase().replace(/[^a-z0-9-]+/g, "-").replace(/^-+|-+$/g, "");
+    if (!baseName) throw new Error("The generated component name is not a valid folder name.");
+
+    let name = baseName;
+    let counter = 2;
+    const componentDirectory = () => [destination, name].filter(Boolean).join("/");
+    while (existsSync(join(repoProfile.workspaceRoot, ...componentDirectory().split("/")))) {
+      name = `${baseName}-${counter}`;
+      counter += 1;
+    }
+
+    const directory = componentDirectory();
+    const filePrefix = directory ? `${directory}/` : "";
+    return {
+      filesToCreate: [`${filePrefix}${name}.html`, `${filePrefix}${name}.css`, `${filePrefix}${name}.js`],
+      filesToModify: [],
+      adjustedBlockName: name,
+    };
+  }
+
   const { authoringSurface, conventions } = repoProfile;
 
   if (reuseDecision.decision === "create") {
